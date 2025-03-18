@@ -1,0 +1,150 @@
+using namespace System.Net
+
+param($Request, $TriggerMetadata)
+
+# Function Settings
+$RequiredGroupId = "48b46407-3cd8-4caf-b7a5-7ae9b0a103c1"  # Set your required group ID
+
+function Validate-JWTtoken {
+    [cmdletbinding()]
+    param(
+        [Parameter(Mandatory=$true)][string]$expectedAudience, # Your App Client ID
+        [Parameter(Mandatory=$true)][string]$expectedIssuer, # Microsoft Issuer (tenant-specific)
+        [Parameter(Mandatory=$true)][string]$idToken  
+    )
+    
+    try {
+        $decoded = Parse-JWTtoken $idToken
+        # Fetch Microsoft Public Keys (JWKs)
+        $jwksUri = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+        $jwks = Invoke-RestMethod -Uri $jwksUri
+        $keys = $jwks.keys
+
+        # Find Matching Key by kid
+        $key = $keys | Where-Object { $_.kid -eq $decoded.Header.kid }
+        if (-not $key) {
+            Write-Host "Invalid token: No matching key found!"
+            return $false
+        }
+
+        # Validate Claims
+        if ($decoded.Payload.iss -ne $expectedIssuer) {
+            Write-Host "Invalid token: Issuer mismatch!"
+            return $false
+        }
+
+        if ($decoded.Payload.aud -ne $expectedAudience) {
+            Write-Host "Invalid token: Audience mismatch!"
+            return $false
+        }
+
+        if ([int](Get-Date -UFormat %s) -ge $decoded.Payload.exp) {
+            Write-Host "Invalid token: Token has expired!"
+            return $false
+        }
+
+        Write-Host "Token is valid!"
+        return $true
+    }
+    catch {
+        Write-Host "Error validating JWT token: $_"
+        return $false
+    }
+}
+
+function Parse-JWTtoken {
+    [cmdletbinding()]
+    param([Parameter(Mandatory=$true)][string]$token)
+
+    try {
+        if (!$token.Contains(".") -or !$token.StartsWith("eyJ")) { 
+            throw "Invalid token format" 
+        }
+
+        # Header
+        $tokenHeader = $token.Split(".")[0].Replace('-', '+').Replace('_', '/')
+        while ($tokenHeader.Length % 4) { $tokenHeader += "=" }
+        $decodedHeader = [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String($tokenHeader)) | ConvertFrom-Json
+
+        # Payload
+        $tokenPayload = $token.Split(".")[1].Replace('-', '+').Replace('_', '/')
+        while ($tokenPayload.Length % 4) { $tokenPayload += "=" }
+        $decodedPayload = [System.Text.Encoding]::ASCII.GetString([System.Convert]::FromBase64String($tokenPayload)) | ConvertFrom-Json
+
+        return @{ Header = $decodedHeader; Payload = $decodedPayload }
+    }
+    catch {
+        Write-Host "Error parsing JWT token: $_"
+        return $null
+    }
+}
+
+try {
+    # Extract headers and body
+    $access = $Request.Headers.access
+    $idToken = $Request.Headers.idtoken
+    $service = $Request.Body.service
+
+    $decoded = Parse-JWTtoken $idToken
+    $decodedAccess = Parse-JWTtoken $access
+    $upn = $decodedAccess.Payload.upn
+
+    if ($decoded -eq $null -or $decodedAccess -eq $null) {
+        throw "JWT Parsing Failed"
+    }
+
+    # Validate both tokens
+    $isValidIdToken = Validate-JWTtoken -idToken $idToken -expectedAudience "405225b4-fda7-448c-8c87-96974312ad2e" -expectedIssuer "https://login.microsoftonline.com/78820852-55fa-450b-908d-45c0d911e76b/v2.0"
+    $isValidAccessToken = Validate-JWTtoken -idToken $access -expectedAudience "00000003-0000-0000-c000-000000000000" -expectedIssuer "https://sts.windows.net/78820852-55fa-450b-908d-45c0d911e76b/"
+    $isValidIdDevToken = Validate-JWTtoken -idToken $idToken -expectedAudience "371ade38-f90b-40cb-b362-30ae520c474d" -expectedIssuer "https://login.microsoftonline.com/78820852-55fa-450b-908d-45c0d911e76b/v2.0"
+    if (($isValidIdToken -or $isValidIdDevToken) -and $isValidAccessToken) {
+        $userGroups = $decoded.Payload.groups
+
+        if ($userGroups -contains $RequiredGroupId) {
+            try {
+                $funcBody = '{"Upn":"'+$upn+'"'+","+$Request.Body.funcBody+'}'
+                Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+                Write-Host "Connected to Azure"
+
+                $subscriptionId = "69d34344-d7b7-4dc2-aefa-fda3c77fb570"
+                Set-AzContext -SubscriptionId $subscriptionId -ErrorAction Stop
+                Write-Host "Switched to subscription: $subscriptionId"
+
+                $keyVaultName = "DevEnv-Portal-urls"
+                $secret = Get-AzKeyVaultSecret -VaultName $keyVaultName -Name $service -AsPlainText
+                Write-Host "Successfully retrieved secret"
+
+                $headers = @{ "Content-Type" = "application/json" }
+                $responseBody = Invoke-RestMethod -Uri $secret -Method Post -Headers $headers -Body $funcBody
+
+                Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+                    StatusCode = [HttpStatusCode]::OK
+                    Body = $responseBody
+                })
+            }
+            catch {
+                Write-Host "Unexpected Error: $_"
+                Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+                    StatusCode = [HttpStatusCode]::InternalServerError
+                    Body = "Unexpected Error: $_"
+                })
+            }
+        }
+        else {
+            Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+                StatusCode = [HttpStatusCode]::Forbidden
+                Body = "Denied"
+            })
+        }
+    }
+    else {
+        throw "Invalid token"
+    }
+}
+catch {
+    Write-Host "Unexpected error: $_"
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = [HttpStatusCode]::InternalServerError
+        Body = "Unexpected server error: $_"
+    })
+}
