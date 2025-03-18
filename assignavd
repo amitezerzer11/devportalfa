@@ -1,0 +1,133 @@
+using namespace System.Net
+
+# Input bindings are passed in via param block.
+param($Request, $TriggerMetadata)
+
+function Check-prerequisites {
+    param(
+        [string]$Upn,
+        [string]$Hp
+
+    )
+    connect-azaccount -identity 
+        $useravds = @"
+desktopvirtualizationresources
+| where type == 'microsoft.desktopvirtualization/hostpools/sessionhosts' 
+| where tolower(properties.assignedUser) == tolower('$Upn')
+| where name startswith 'PAVD-$Hp-hp/'
+
+"@
+
+    # Execute the query to get results
+    $sessionHost = Search-AzGraph -Query $useravds -first 1
+    $userhosts = ($sessionHost.name -split "/")[-1]
+
+    if ($userhosts) {
+        $Avds = "true"
+    }
+    else {
+        $Avds = "false"
+    }
+
+    $availablehosts = @"
+desktopvirtualizationresources
+    | where type == 'microsoft.desktopvirtualization/hostpools/sessionhosts'
+    | where isnull(properties.assignedUser)
+    | where name startswith 'PAVD-$Hp-hp/'
+"@
+
+    $sessionHosts = Search-AzGraph -Query $availablehosts -first 1
+    $availableavds = ($sessionHosts.name -split "/")[-1]
+
+    # Execute the query to get results
+    if($availableavds){
+        $available = "true"
+    }
+    else {
+        $available = "false"
+    }
+
+    return @{
+        Avd   = $Avds
+        Available = $available
+    }
+}
+
+#function that adds user to avd group if not there
+function Assign-Avds {
+    param(
+        [string]$Upn,
+        [string]$Hp
+
+    )
+    
+    # Connect using managed identity
+    connect-azaccount -identity 
+
+    $groupName = "Standard-users-PAVD-AVD-$Hp"
+
+    # Get the group and user objects
+    $group = Get-AzADGroup -DisplayName $groupName
+    
+    # Add the user to the group
+    Add-AzADGroupMember -TargetGroupObjectId $group.id -MemberUserPrincipalName $Upn
+
+    return @{
+        Group   = $group
+    }
+
+
+}
+
+
+try {
+    
+
+    $request_body = $Request.Body 
+
+    $Upn = $request_body.Upn
+    $hostpool = $request_body.Hp
+
+    $Check = Check-prerequisites -Upn $Upn -Hp $hostpool
+    $AssignAvd = Assign-Avds -Upn $Upn -Hp $hostpool
+    $group = $AssignAvd.Group
+    $groupdisplay = $group.DisplayName
+    if (Get-AzADGroupMember -GroupDisplayName $groupdisplay | Where-Object { $_.Mail -eq $Upn }) {
+    if (($Check.Avd -eq "false") -and  ($Check.Available -eq "true")) {
+    # Access group and user from the result
+        # Convert to JSON and write the output
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 200  # OK
+    })
+    }
+    else {
+
+        if ($Check.Avd -eq "true"){
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  
+        Body = "Error: User already has an avd assigned in hostpool "
+    })
+        }
+        elseif ($Check.Available -eq "false"){
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  
+        Body = "Error: No available avds in hostpool"
+    })
+        }
+    }
+    }
+    else {
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  
+        Body = "Error: Error in adding user to group"
+    })
+    }
+
+}
+catch {
+    # Handle any errors and return a failed response
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  # Internal Server Error
+        Body = "Error: $($_.Exception.Message)"
+    })
+}
