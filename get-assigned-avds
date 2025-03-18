@@ -1,0 +1,59 @@
+using namespace System.Net
+param($Request, $TriggerMetaData)
+
+# Define a function to get assigned AVDs
+function Get-Avds {
+    param (
+        [string]$Upn  
+    )
+
+    # Connect to Azure using the system-assigned managed identity
+    Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+
+    # Define the query to search for session hosts associated with the user
+    $query = @"
+desktopvirtualizationresources
+| where type == 'microsoft.desktopvirtualization/hostpools/sessionhosts' 
+| where tolower(properties.assignedUser) == tolower('$Upn')
+"@
+
+    # Execute the query to get results
+    $results = Search-AzGraph -Query $query
+
+    $sessionHostNames = @()
+
+    # Loop through each result and extract the session host name
+    foreach ($result in $results) {
+        $sessionHostName = ($result.id -split "/")[-1] # If you want the hostpool, use -3
+        $sessionHostNames += $sessionHostName
+    }
+
+    # Return the list of session host names (AVDs) associated with the user
+    return $sessionHostNames
+}
+
+try {
+    # Extract the UPN from the request body
+    $Upn = $Request.Body.Upn
+    # Call the function to get AVDs for the given UPN
+    $AvdNames = Get-Avds -Upn $Upn
+
+    # Format the output in JSON
+    $output = @{
+        vms = $AvdNames
+    }
+
+    # Convert to JSON and write the output
+    $jsonOutput = $output | ConvertTo-Json -Depth 1 -Compress
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 200  # OK
+        Body = $jsonOutput
+    })
+}
+catch {
+    # Handle any errors and return a failed response
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  # Internal Server Error
+        Body = "Error: $($_.Exception.Message)"
+    })
+}
