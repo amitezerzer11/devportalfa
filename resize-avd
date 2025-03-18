@@ -1,0 +1,55 @@
+using namespace System.Net
+
+# Input bindings are passed in via param block.
+param($Request, $TriggerMetadata)
+
+# Write to the Azure Functions log stream.
+Write-Host "PowerShell HTTP trigger function processed a request."
+
+# Function that resizes avd to user's desired size
+function Resize-Avd {
+    param(
+        [string]$vmName,
+        [string]$size
+    )
+    
+    # Connect to Azure using the system-assigned managed identity
+    Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+
+    # Get AVDs info
+    $resource = Get-AzResource -Name $vmName
+    $resourceGroup = $resource.ResourceGroupName
+    $vm = Get-AzVM -ResourceGroupName $resourceGroup -VMName $vmName
+    $stat = ""
+    # Define new AVD size only if size is different
+    if($vm.HardwareProfile.VmSize -ne $size)
+    {
+        $vm.HardwareProfile.VmSize = $size
+        $resizeStatus = Update-AzVM -VM $vm -ResourceGroupName $resourceGroup
+        $stat = "Successfuly resized AVD"
+    }
+    else
+    {
+        $stat = "AVD already at this size"
+    }
+
+    if($resizeStatus.IsSuccessStatusCode -eq $true)
+    {
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+            StatusCode = 200  # OK
+            Body = $stat
+        })
+    }
+
+    else
+    {
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+            StatusCode = 500  # Internal Server Error
+            Body = $stat
+        })
+    }
+}
+$vmName = $Request.Body.vmName
+$size = $Request.Body.size
+
+Resize-Avd -vmName $vmName -size $size
