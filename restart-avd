@@ -1,0 +1,61 @@
+using namespace System.Net
+param($Request, $TriggerMetaData)
+
+#function that restarts avd based on upn and avd 
+function Restart-Avd {
+    param(
+        [string]$Upn,
+        [string]$Avd
+
+    )
+#connects to managed identity
+    Connect-AzAccount -Identity -ErrorAction Stop | Out-Null
+
+#querys the graph to get the correct avd
+$query = @"
+desktopvirtualizationresources
+| where type == "microsoft.desktopvirtualization/hostpools/sessionhosts" 
+| where tolower(properties.assignedUser) == tolower("$Upn")
+| where tolower(split(name, '/')[1]) == tolower("$avd")
+"@
+
+# Execute the query
+$results = Search-AzGraph -Query $query
+$Status = $results.properties.status
+
+$ResourceGroup = $results.resourcegroup
+$sessionHostName = ($results.id -split "/")[-1]
+starts avd based on current status
+if($Status -eq "Shutdown"){
+    $Startavd = Start-AzVM -ResourceGroupName $ResourceGroup -Name $sessionHostName
+    $RestartStatus = $Startavd.status
+}
+elseif($Status -eq "Available")
+{
+    $RestartAvd = Restart-AzVM -ResourceGroupName $ResourceGroup -Name $sessionHostName
+    $RestartStatus = $RestartAvd.status
+}
+else{
+    $RestartStatus = "Failed"
+}
+
+returns status of operation
+if($RestartStatus -eq "Succeeded")
+{
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 200  # OK
+        Body = "success"
+    })
+}
+
+else{
+    Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+        StatusCode = 500  # Internal Server Error
+        Body = $Status
+    })
+}
+}
+$Upn = $Request.Body.Upn
+$Avd = $Request.Body.Avd
+
+Restart-Avd -Upn $Upn -avd $Avd
