@@ -1,0 +1,19 @@
+using namespace System.Net
+param($Request, $TriggerMetaData)
+
+# Create the output object as a hashtable with the desired keys and values
+$output = @{
+    "SHR" = "this hostpool is for users in shahar"
+    "MRM" = "this hostpool is for users in mammram"
+    "KPMG" = "this hostpool is for users in cyber"
+    "ANM" = "this hostpool is for users in anan magen"
+}
+
+# Convert the hashtable to JSON
+$jsonOutput = $output | ConvertTo-Json -Depth 1 -Compress
+
+# Return the JSON response
+Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    StatusCode = 200  # OK
+    Body = $jsonOutput
+})
